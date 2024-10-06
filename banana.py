@@ -4,6 +4,10 @@ import random
 import time
 import traceback
 import requests
+import base64
+import hashlib
+from Crypto.Cipher import AES
+from Crypto import Random
 from colorama import *
 from datetime import datetime
 import json
@@ -79,14 +83,52 @@ class Banana:
                 self.log(f"{red}Lỗi khi ghi vào file banana.txt: {str(write_error)}")
         return False
 
+    def pad(self, s):
+        block_size = 16
+        padding = block_size - len(s.encode('utf-8')) % block_size
+        return s + chr(padding) * padding
+
+    def get_key_and_iv(self, password, salt, klen=32, ilen=16, msgdgst='md5'):
+        password = password.encode('utf-8')
+        maxlen = klen + ilen
+        keyiv = b''
+        prev = b''
+        while len(keyiv) < maxlen:
+            prev = hashlib.md5(prev + password + salt).digest()
+            keyiv += prev
+        key = keyiv[:klen]
+        iv = keyiv[klen:klen+ilen]
+        return key, iv
+
+    def encrypt_timestamp(self, timestamp, password):
+        salt = Random.new().read(8)
+        key, iv = self.get_key_and_iv(password, salt)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        padded_timestamp = self.pad(timestamp)
+        encrypted = cipher.encrypt(padded_timestamp.encode('utf-8'))
+        encrypted_data = b"Salted__" + salt + encrypted
+        encrypted_b64 = base64.b64encode(encrypted_data).decode('utf-8')
+        return encrypted_b64
+
     def headers(self, token):
+        timestamp = str(int(time.time() * 1000))
+        encrypted_timestamp = self.encrypt_timestamp(timestamp, "1,1,0")
         return {
             "Accept": "application/json, text/plain, */*",
             "Authorization": f"Bearer {token}",
             "Origin": "https://banana.carv.io",
             "Referer": "https://banana.carv.io/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "X-App-Id": "carv",
+            "Request-Time": encrypted_timestamp
         }
+
+    def do_lottery(self, token):
+        url = "https://interface.carv.io/banana/do_lottery"
+        headers = self.headers(token)
+        data = {}
+        response = scraper.post(url=url, headers=headers, json=data)
+        return response
 
     def get_token(self, data):
         url = f"https://interface.carv.io/banana/login"
@@ -113,14 +155,34 @@ class Banana:
 
         return response
 
-    def banana_list(self, token):
-        url = f"https://interface.carv.io/banana/get_banana_list"
-
-        headers = self.headers(token=token)
-
-        response = scraper.get(url=url, headers=headers)
-
-        return response
+    def banana_list(self, token, page_size=10):
+        page_num = 1
+        all_bananas = []
+        
+        while True:
+            url = f"https://interface.carv.io/banana/get_banana_list/v2?page_num={page_num}&page_size={page_size}"
+            headers = self.headers(token=token)
+            response = scraper.get(url=url, headers=headers)
+            
+            if response.status_code != 200:
+                self.log(f"{red}Không thể lấy danh sách chuối ở trang {page_num}: {response.status_code}")
+                break
+            
+            data = response.json()
+            if data["code"] != 0 or data["msg"] != "Success":
+                self.log(f"{red}Lỗi khi lấy danh sách chuối ở trang {page_num}: {data['msg']}")
+                break
+            
+            bananas = data["data"]["list"]
+            if not bananas:
+                break
+            
+            all_bananas.extend(bananas)
+            page_num += 1
+            if page_num > 99:
+                break
+        
+        return all_bananas
 
     def equip_banana(self, token, banana_id):
         url = f"https://interface.carv.io/banana/do_equip"
@@ -133,14 +195,21 @@ class Banana:
 
         return response
 
-    def quest_list(self, token):
-        url = f"https://interface.carv.io/banana/get_quest_list"
-
+    def quest_list(self, token, page_num=1, page_size=500):
+        url = f"https://interface.carv.io/banana/get_quest_list/v2?page_num={page_num}&page_size={page_size}"
         headers = self.headers(token=token)
-
-        response = scraper.get(url=url, headers=headers)
-
-        return response
+        try:
+            response = scraper.get(url=url, headers=headers)
+            response.raise_for_status()
+            quest_data = response.json()
+            if quest_data["code"] == 0 and quest_data["msg"] == "Success":
+                quests = quest_data["data"]["list"]
+                return quest_data
+            else:
+                self.log(f"Error in quest_list: {quest_data['msg']}")
+                return None
+        except Exception as e:
+            return None
 
     def achieve_quest(self, token, quest_id):
         url = f"https://interface.carv.io/banana/achieve_quest"
@@ -212,20 +281,6 @@ class Banana:
         headers = self.headers(token=token)
 
         data = {"claimLotteryType": 1}
-
-        response = scraper.post(url=url, headers=headers, data=data)
-
-        return response
-
-
-    def do_lottery(self, token):
-        url = f"https://interface.carv.io/banana/do_lottery"
-
-        headers = self.headers(token=token)
-
-        headers["Content-Type"] = "application/json"
-
-        data = {}
 
         response = scraper.post(url=url, headers=headers, data=data)
 
@@ -332,7 +387,7 @@ class Banana:
                     else:
                         self.log(f"{yellow}Không có tg_id, bỏ qua việc gọi API adsgram")
                     
-                    wait_time = 15 + random.uniform(0.1, 0.5)
+                    wait_time = 1 + random.uniform(0.1, 0.5)
                     self.log(f"{yellow}Đang chờ {wait_time:.2f} giây trước khi claim quảng cáo...")
                     time.sleep(wait_time)
                     
@@ -445,56 +500,70 @@ class Banana:
                     # Do task
                     if self.auto_do_task:
                         self.log(f"{yellow}Tự động thực hiện nhiệm vụ: {green}ON")
-                        get_quest_list = self.quest_list(token=token).json()
-                        quest_list = get_quest_list["data"]["quest_list"]
-                        for quest in quest_list:
-                            quest_id = quest["quest_id"]
-                            quest_name = quest["quest_name"]
-                            achieve_status = quest["is_achieved"]
-                            claim_status = quest["is_claimed"]
-                            if not achieve_status and not claim_status:
-                                achieve_quest = self.achieve_quest(
-                                    token=token, quest_id=quest_id
-                                ).json()
-                                claim_quest = self.claim_quest(
-                                    token=token, quest_id=quest_id
-                                ).json()
-                                quest_status = claim_quest["msg"]
-                                if quest_status == "Success":
-                                    self.log(f"{white}Làm nhiệm vụ {yellow}{quest_name}: {green}Thành công")
+                        get_quest_list = self.quest_list(token=token)
+                        if get_quest_list and "data" in get_quest_list and "list" in get_quest_list["data"]:
+                            quest_list = get_quest_list["data"]["list"]
+                            
+                            for quest in quest_list:
+                                quest_id = quest.get("quest_id") or quest.get("id")
+                                if quest_id is None:
+                                    self.log(f"{red}Không tìm thấy quest_id cho nhiệm vụ: {quest}")
+                                    continue
+                                
+                                quest_name = quest.get("quest_name", "Unknown")
+                                achieve_status = quest.get("is_achieved", False)
+                                claim_status = quest.get("is_claimed", False)
+                                
+                                if not achieve_status and not claim_status:
+                                    try:
+                                        achieve_quest = self.achieve_quest(token=token, quest_id=quest_id).json()
+                                        if achieve_quest.get("code") == 0 and achieve_quest.get("msg") == "Success":
+                                            self.log(f"{white}Hoàn thành nhiệm vụ {yellow}{quest_name}: {green}Thành công")
+                                        else:
+                                            self.log(f"{white}Hoàn thành nhiệm vụ {yellow}{quest_name}: {red}Thất bại - {achieve_quest.get('msg', 'Unknown error')}")
+                                        
+                                        claim_quest = self.claim_quest(token=token, quest_id=quest_id).json()
+                                        if claim_quest.get("code") == 0 and claim_quest.get("msg") == "Success":
+                                            self.log(f"{white}Nhận thưởng nhiệm vụ {yellow}{quest_name}: {green}Thành công")
+                                        else:
+                                            self.log(f"{white}Nhận thưởng nhiệm vụ {yellow}{quest_name}: {red}Thất bại - {claim_quest.get('msg', 'Unknown error')}")
+                                    except Exception as e:
+                                        self.log(f"{red}Lỗi khi xử lý nhiệm vụ {quest_name}:")
+                                        self.log(f"{red}{str(e)}")
+                                        self.log(f"{red}Traceback:")
+                                        self.log(f"{red}{traceback.format_exc()}")
+                                elif achieve_status and not claim_status:
+                                    try:
+                                        claim_quest = self.claim_quest(token=token, quest_id=quest_id).json()
+                                        if claim_quest.get("code") == 0 and claim_quest.get("msg") == "Success":
+                                            self.log(f"{white}Nhận thưởng nhiệm vụ {yellow}{quest_name}: {green}Thành công")
+                                        else:
+                                            self.log(f"{white}Nhận thưởng nhiệm vụ {yellow}{quest_name}: {red}Thất bại - {claim_quest.get('msg', 'Unknown error')}")
+                                    except Exception as e:
+                                        self.log(f"{red}Lỗi khi nhận thưởng nhiệm vụ {quest_name}:")
+                                        self.log(f"{red}{str(e)}")
+                                        self.log(f"{red}Traceback:")
+                                        self.log(f"{red}{traceback.format_exc()}")
                                 else:
-                                    self.log(
-                                        f"{white}Làm nhiệm vụ {yellow}{quest_name}: {red}Thất bại (cần tự làm)"
-                                    )
-                            elif achieve_status and not claim_status:
-                                claim_quest = self.claim_quest(
-                                    token=token, quest_id=quest_id
-                                ).json()
-                                quest_status = claim_quest["msg"]
-                                if quest_status == "Success":
-                                    self.log(f"{white}Làm nhiệm vụ {yellow}{quest_name}: {green}Thành công")
-                                else:
-                                    self.log(
-                                        f"{white}Làm nhiệm vụ {yellow}{quest_name}: {red}Thất bại (cần tự làm)"
-                                    )
-                            else:
-                                self.log(f"{white}Làm nhiệm vụ {yellow}{quest_name}: {green}Thành công")
+                                    self.log(f"{white}Nhiệm vụ {yellow}{quest_name}: {green}Đã hoàn thành và nhận thưởng")
 
-                        while True:
-                            claim_quest_lottery = self.claim_quest_lottery(
-                                token=token
-                            ).json()
-                            quest_lottery_status = claim_quest_lottery["msg"]
-                            if quest_lottery_status == "Success":
-                                self.log(
-                                    f"{white}Claim Quest {green}Thành công"
-                                )
-                                continue
-                            else:
-                                self.log(
-                                    f"{red}Không có Quest cần claim"
-                                )
-                                break
+                            # Xử lý claim quest lottery
+                            while True:
+                                try:
+                                    claim_quest_lottery = self.claim_quest_lottery(token=token).json()
+                                    if claim_quest_lottery.get("code") == 0 and claim_quest_lottery.get("msg") == "Success":
+                                        self.log(f"{white}Claim Quest Lottery: {green}Thành công")
+                                    else:
+                                        self.log(f"{yellow}Không còn Quest Lottery để claim")
+                                        break
+                                except Exception as e:
+                                    self.log(f"{red}Lỗi khi claim Quest Lottery:")
+                                    self.log(f"{red}{str(e)}")
+                                    self.log(f"{red}Traceback:")
+                                    self.log(f"{red}{traceback.format_exc()}")
+                                    break
+                        else:
+                            self.log(f"{red}Không thể lấy danh sách nhiệm vụ hoặc danh sách trống")
                     else:
                         self.log(f"{yellow}Tự động thực hiện nhiệm vụ: {red}OFF")
 
@@ -566,10 +635,11 @@ class Banana:
                                         self.log(f"{white}Claim Banana: {red}Thất bại")
                                         self.log(f"{red}Chi tiết lỗi: {claim_lottery}")
                                 elif lottery_count > 0:
-                                    do_lottery = self.do_lottery(token=token).json()
-                                    lottery_status = do_lottery.get("msg")
+                                    do_lottery_response = self.do_lottery(token=token)
+                                    do_lottery = do_lottery_response.json()
+                                    lottery_status = do_lottery.get('msg')
                                     if lottery_status == "Success":
-                                        banana_data = do_lottery.get("data", {})
+                                        banana_data = do_lottery.get("data", {}).get("banana_info", {})
                                         banana_name = banana_data.get("name", "Unknown")
                                         usdt_value = banana_data.get("sell_exchange_usdt", 0)
                                         peel_value = banana_data.get("sell_exchange_peel", 0)
@@ -599,9 +669,13 @@ class Banana:
                                     self.log(f"{white}Claim and Harvest Banana: {yellow}Chưa đến thời gian thu hoạch")
                                     break
 
+                            except json.JSONDecodeError as json_err:
+                                self.log(f"{red}Lỗi khi phân tích JSON: {str(json_err)}")
+                                self.log(f"Nội dung phản hồi: {json_err.doc}")
                             except Exception as e:
                                 self.log(f"{red}Lỗi trong quá trình thu hoạch: {str(e)}")
-                                break
+                                self.log(f"Traceback: {traceback.format_exc()}")
+                            break
 
                     else:
                         self.log(f"{yellow}Tự động thu hoạch chuối: {red}OFF")
@@ -609,30 +683,47 @@ class Banana:
                     # Equip banana
                     if self.auto_equip_banana:
                         self.log(f"{yellow}Sử dụng chuối tốt nhất: {green}ON")
-                        get_banana_list = self.banana_list(token=token).json()
-                        banana_list = get_banana_list["data"]["banana_list"]
-                        banana_with_max_peel = max(
-                            (banana for banana in banana_list if banana["count"] > 0),
-                            key=lambda b: b["daily_peel_limit"],
-                        )
-                        banana_id = banana_with_max_peel["banana_id"]
-                        banana_name = banana_with_max_peel["name"]
-                        banana_peel_limit = banana_with_max_peel["daily_peel_limit"]
-                        banana_peel_price = banana_with_max_peel["sell_exchange_peel"]
-                        banana_usdt_price = banana_with_max_peel["sell_exchange_usdt"]
-
-                        equip_banana = self.equip_banana(
-                            token=token, banana_id=banana_id
-                        ).json()
-                        equip_status = equip_banana["msg"]
-                        if equip_status == "Success":
-                            self.log(
-                                f"{green}Bạn đang dùng chuối tốt nhất: {white}{banana_name} - {green}Daily Peel Limit: {white}{banana_peel_limit} - {green}Peel Price: {white}{banana_peel_price} - {green}USDT Price: {white}{banana_usdt_price}"
-                            )
-                        else:
-                            self.log(f"{white}Sử dụng chuối: {green}Thất bại")
+                        try:
+                            banana_list = self.banana_list(token=token)
+                            if not banana_list:
+                                self.log(f"{red}Không có chuối khả dụng để sử dụng")
+                            else:
+                                # Lọc ra các chuối có count > 0
+                                available_bananas = [banana for banana in banana_list if banana["count"] > 0]
+                                if not available_bananas:
+                                    self.log(f"{red}Không có chuối nào có số lượng > 0.")
+                                else:
+                                    # Chọn chuối có giá trị cao nhất dựa trên tiêu chí của bạn
+                                    # Ví dụ: chuối có sell_exchange_usdt cao nhất
+                                    best_banana = max(available_bananas, key=lambda b: b["sell_exchange_usdt"])
+                                    
+                                    # Nếu tất cả sell_exchange_usdt đều bằng 0, chọn dựa trên daily_peel_limit
+                                    if best_banana["sell_exchange_usdt"] == 0:
+                                        best_banana = max(available_bananas, key=lambda b: b["daily_peel_limit"])
+                                    
+                                    banana_id = best_banana["banana_id"]
+                                    banana_name = best_banana["name"]
+                                    banana_peel_limit = best_banana["daily_peel_limit"]
+                                    banana_peel_price = best_banana["sell_exchange_peel"]
+                                    banana_usdt_price = best_banana["sell_exchange_usdt"]
+                                    
+                                    # Gọi hàm equip_banana để sử dụng chuối
+                                    equip_banana_response = self.equip_banana(token=token, banana_id=banana_id).json()
+                                    if equip_banana_response["code"] == 0 and equip_banana_response["msg"] == "Success":
+                                        self.log(
+                                            f"{green}Bạn đang dùng chuối tốt nhất: {white}{banana_name} - "
+                                            f"{green}Daily Peel Limit: {white}{banana_peel_limit} - "
+                                            f"{green}Peel Price: {white}{banana_peel_price} - "
+                                            f"{green}USDT Price: {white}{banana_usdt_price}"
+                                        )
+                                    else:
+                                        self.log(f"{white}Sử dụng chuối: {red}Thất bại - {equip_banana_response['msg']}")
+                        except Exception as e:
+                            self.log(f"{red}Lỗi khi sử dụng chuối tốt nhất: {str(e)}")
+                            self.log(f"Traceback: {traceback.format_exc()}")
                     else:
                         self.log(f"{yellow}Sử dụng chuối tốt nhất: {red}OFF")
+
 
                 except Exception as e:
                     self.log(f"{red}Đăng nhập thất bại, thử lại sau!")
